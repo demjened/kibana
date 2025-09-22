@@ -5,7 +5,7 @@
  * 2.0.
  */
 
-import React from 'react';
+import React, { useEffect } from 'react';
 import { APPLY_FILTER_TRIGGER } from '@kbn/data-plugin/public';
 import type { ApplicationStart } from '@kbn/core/public';
 import type { SerializableRecord } from '@kbn/utility-types';
@@ -14,7 +14,7 @@ import type {
   UiActionsEnhancedDrilldownDefinition as Drilldown,
   UiActionsEnhancedBaseActionFactoryContext as BaseActionFactoryContext,
 } from '@kbn/ui-actions-enhanced-plugin/public';
-import { EuiFormRow, EuiSwitch, EuiFieldText } from '@elastic/eui';
+import { EuiFormRow, EuiSwitch, EuiFieldText, EuiButton, EuiButtonIcon, EuiFlexGroup, EuiFlexItem, EuiSpacer, EuiCheckbox } from '@elastic/eui';
 import type { ApplyGlobalFilterActionContext } from '@kbn/unified-search-plugin/public';
 import { i18n } from '@kbn/i18n';
 import type { DataViewsService } from '@kbn/data-views-plugin/public';
@@ -165,6 +165,123 @@ function getFieldNameFromOperation(node: any): string | null {
   return null;
 }
 
+// Helper function to extract initial field names from chart context
+function extractInitialFieldNames(context: ActionFactoryContext): string[] {
+  const fieldNames = new Set<string>();
+  
+  if (isLensApi(context.embeddable)) {
+    const viewArgs = context.embeddable.getViewUnderlyingDataArgs();
+    if (viewArgs) {
+      // Extract fields from structured filters
+      const lensFilters = viewArgs.filters || [];
+      const filterFields = extractFieldsFromFilters(lensFilters);
+      filterFields.forEach(fieldInfo => {
+        // Only include fields that are allowed for logs and not core fields
+        if (shouldKeepField(fieldInfo.field) && 
+            !['@timestamp', 'message', 'log.level'].includes(fieldInfo.field)) {
+          fieldNames.add(fieldInfo.field);
+        }
+      });
+
+      // Extract fields from KQL query
+      const lensQuery = viewArgs.query;
+      if (lensQuery && 'query' in lensQuery && 
+          typeof lensQuery.query === 'string' && lensQuery.query.trim()) {
+        const result = filterKQLQuery(lensQuery.query);
+        result.keptFields.forEach(field => {
+          // Only include fields that are allowed for logs and not core fields
+          if (shouldKeepField(field) && 
+              !['@timestamp', 'message', 'log.level'].includes(field)) {
+            fieldNames.add(field);
+          }
+        });
+      }
+    }
+  }
+  
+  return Array.from(fieldNames);
+}
+
+// Helper function to extract filter criteria for synchronized fields only
+function extractSynchronizedFilters(filters: Filter[], synchronizedFields: string[]): Filter[] {
+  return filters.filter(filter => {
+    if (filter.meta?.key) {
+      return synchronizedFields.includes(filter.meta.key);
+    }
+    return false;
+  });
+}
+
+// Helper function to build KQL query with only synchronized fields
+function buildSynchronizedKQLQuery(queryString: string, synchronizedFields: string[]): string {
+  if (!queryString || typeof queryString !== 'string' || synchronizedFields.length === 0) {
+    return '';
+  }
+  
+  try {
+    const ast = fromKueryExpression(queryString);
+    const filteredAst = filterASTForSynchronizedFields(ast, synchronizedFields);
+    
+    if (!filteredAst) {
+      return '';
+    }
+    
+    return toKqlExpression(filteredAst);
+  } catch (error) {
+    console.warn('Failed to build synchronized KQL query:', error);
+    return '';
+  }
+}
+
+// Recursively filter AST nodes to keep only synchronized fields
+function filterASTForSynchronizedFields(node: any, synchronizedFields: string[]): any {
+  if (!node) return null;
+
+  switch (node.type) {
+    case 'function':
+      return filterFunctionNodeForSynchronizedFields(node, synchronizedFields);
+    case 'literal':
+    case 'wildcard':
+      return node;
+    default:
+      return node;
+  }
+}
+
+// Filter function nodes for synchronized fields
+function filterFunctionNodeForSynchronizedFields(node: any, synchronizedFields: string[]): any {
+  if (!node.function) return null;
+  
+  switch (node.function) {
+    case 'and':
+    case 'or':
+      const filteredArgs = node.arguments
+        .map((arg: any) => filterASTForSynchronizedFields(arg, synchronizedFields))
+        .filter((arg: any) => arg !== null);
+      
+      if (filteredArgs.length === 0) {
+        return null;
+      } else if (filteredArgs.length === 1) {
+        return filteredArgs[0];
+      } else {
+        return {
+          ...node,
+          arguments: filteredArgs,
+        };
+      }
+      
+    case 'is':
+    case 'range':
+    default:
+      // Check if this field operation should be kept
+      const fieldName = getFieldNameFromOperation(node);
+      if (fieldName && synchronizedFields.includes(fieldName)) {
+        return node;
+      }
+      return null;
+  }
+}
+
 interface OpenLogsInDiscoverDeps {
   locator: () => DiscoverAppLocator | undefined;
   dataViews: () => Pick<DataViewsService, 'get' | 'find' | 'create'>;
@@ -178,7 +295,8 @@ export type ActionContext = ApplyGlobalFilterActionContext & {
 
 export interface Config extends SerializableRecord {
   openInNewTab: boolean;
-  fieldName?: string;
+  fieldNames: string[];
+  synchronizedFields: string[]; // Fields that should carry over filter criteria
 }
 
 export type OpenLogsInDiscoverTrigger = typeof APPLY_FILTER_TRIGGER;
@@ -200,31 +318,128 @@ export class OpenLogsInDiscoverDrilldown
       defaultMessage: 'Open logs in Discover',
     });
 
-  public readonly euiIcon = 'discoverApp';
+  public readonly euiIcon = 'logsApp';
 
   supportedTriggers(): OpenLogsInDiscoverTrigger[] {
     return [APPLY_FILTER_TRIGGER];
   }
 
-  private readonly ReactCollectConfig: React.FC<CollectConfigProps> = ({ config, onConfig }) => {
+  private readonly ReactCollectConfig: React.FC<CollectConfigProps> = ({ config, onConfig, context }) => {
+    // Auto-populate fields from chart context when creating a new drilldown
+    useEffect(() => {
+      // Only populate if fieldNames is empty (new drilldown) and context is available
+      if (config.fieldNames.length === 0 && context) {
+        const initialFields = extractInitialFieldNames(context);
+        if (initialFields.length > 0) {
+          // Mark auto-populated fields as synchronized by default
+          onConfig({ 
+            ...config, 
+            fieldNames: initialFields,
+            synchronizedFields: initialFields 
+          });
+        }
+      }
+    }, []); // Empty dependency array - only run once when component mounts
+
+    const addField = () => {
+      const newFieldNames = [...config.fieldNames, ''];
+      // New fields are not synchronized by default
+      onConfig({ ...config, fieldNames: newFieldNames });
+    };
+
+    const removeField = (indexToRemove: number) => {
+      const newFieldNames = config.fieldNames.filter((_, index) => index !== indexToRemove);
+      const fieldToRemove = config.fieldNames[indexToRemove];
+      const newSynchronizedFields = config.synchronizedFields.filter(field => field !== fieldToRemove);
+      onConfig({ ...config, fieldNames: newFieldNames, synchronizedFields: newSynchronizedFields });
+    };
+
+    const updateField = (index: number, value: string) => {
+      const newFieldNames = [...config.fieldNames];
+      const oldFieldName = newFieldNames[index];
+      newFieldNames[index] = value;
+      
+      // Update synchronized fields array if the field name changed
+      const newSynchronizedFields = config.synchronizedFields.map(field => 
+        field === oldFieldName ? value : field
+      );
+      
+      onConfig({ ...config, fieldNames: newFieldNames, synchronizedFields: newSynchronizedFields });
+    };
+
+    const toggleSynchronization = (fieldName: string, checked: boolean) => {
+      let newSynchronizedFields;
+      if (checked) {
+        // Add to synchronized fields if not already present
+        newSynchronizedFields = config.synchronizedFields.includes(fieldName) 
+          ? config.synchronizedFields 
+          : [...config.synchronizedFields, fieldName];
+      } else {
+        // Remove from synchronized fields
+        newSynchronizedFields = config.synchronizedFields.filter(field => field !== fieldName);
+      }
+      onConfig({ ...config, synchronizedFields: newSynchronizedFields });
+    };
+
     return (
       <>
         <EuiFormRow
-          label={i18n.translate('xpack.lens.app.openLogsInDiscoverDrilldown.fieldNameConfig', {
-            defaultMessage: 'Additional field to display',
+          label={i18n.translate('xpack.lens.app.openLogsInDiscoverDrilldown.fieldNamesConfig', {
+            defaultMessage: 'Additional fields to display',
           })}
-          helpText={i18n.translate('xpack.lens.app.openLogsInDiscoverDrilldown.fieldNameHelpText', {
-            defaultMessage: 'Specify an additional field name to include in the Discover columns (optional)',
+          helpText={i18n.translate('xpack.lens.app.openLogsInDiscoverDrilldown.fieldNamesHelpText', {
+            defaultMessage: 'Specify additional field names to include in the Discover columns. Fields from your chart\'s filters and query are automatically included.',
           })}
         >
-          <EuiFieldText
-            placeholder={i18n.translate('xpack.lens.app.openLogsInDiscoverDrilldown.fieldNamePlaceholder', {
-              defaultMessage: 'e.g., service.version',
-            })}
-            value={config.fieldName || ''}
-            onChange={(e) => onConfig({ ...config, fieldName: e.target.value })}
-            data-test-subj="openLogsInDiscoverDrilldownFieldName"
-          />
+          <div>
+            {config.fieldNames.map((fieldName, index) => (
+              <EuiFlexGroup key={index} alignItems="center" gutterSize="s">
+                <EuiFlexItem>
+                  <EuiFieldText
+                    placeholder={i18n.translate('xpack.lens.app.openLogsInDiscoverDrilldown.fieldNamePlaceholder', {
+                      defaultMessage: 'e.g., service.version',
+                    })}
+                    value={fieldName}
+                    onChange={(e) => updateField(index, e.target.value)}
+                    data-test-subj={`openLogsInDiscoverDrilldownFieldName-${index}`}
+                  />
+                </EuiFlexItem>
+                <EuiFlexItem grow={false}>
+                  <EuiCheckbox
+                    id={`sync-${index}`}
+                    label={i18n.translate('xpack.lens.app.openLogsInDiscoverDrilldown.synchronizeLabel', {
+                      defaultMessage: 'Sync filters',
+                    })}
+                    checked={config.synchronizedFields.includes(fieldName)}
+                    onChange={(e) => toggleSynchronization(fieldName, e.target.checked)}
+                    data-test-subj={`openLogsInDiscoverDrilldownSyncField-${index}`}
+                  />
+                </EuiFlexItem>
+                <EuiFlexItem grow={false}>
+                  <EuiButtonIcon
+                    iconType="cross"
+                    color="danger"
+                    onClick={() => removeField(index)}
+                    aria-label={i18n.translate('xpack.lens.app.openLogsInDiscoverDrilldown.removeFieldAriaLabel', {
+                      defaultMessage: 'Remove field',
+                    })}
+                    data-test-subj={`openLogsInDiscoverDrilldownRemoveField-${index}`}
+                  />
+                </EuiFlexItem>
+              </EuiFlexGroup>
+            ))}
+            <EuiSpacer size="s" />
+            <EuiButton
+              iconType="plus"
+              size="s"
+              onClick={addField}
+              data-test-subj="openLogsInDiscoverDrilldownAddField"
+            >
+              {i18n.translate('xpack.lens.app.openLogsInDiscoverDrilldown.addFieldButton', {
+                defaultMessage: 'Add field',
+              })}
+            </EuiButton>
+          </div>
         </EuiFormRow>
         <EuiFormRow hasChildLabel={false}>
           <EuiSwitch
@@ -246,7 +461,8 @@ export class OpenLogsInDiscoverDrilldown
 
   public readonly createConfig = () => ({
     openInNewTab: true,
-    fieldName: '',
+    fieldNames: [],
+    synchronizedFields: [],
   });
 
   public readonly isConfigValid = (config: Config): config is Config => {
@@ -306,14 +522,32 @@ export class OpenLogsInDiscoverDrilldown
       }
     }
 
-    // Extract field conditions from structured filters
-    const filterFields = extractFieldsFromFilters(lensFilters);
+    // Extract only synchronized filters and field conditions
+    const synchronizedFilters = extractSynchronizedFilters(lensFilters, config.synchronizedFields);
+    const filterFields = extractFieldsFromFilters(synchronizedFilters);
 
     console.log('OpenLogsInDiscoverDrilldown -> getHref()');
+    console.log('config.synchronizedFields', config.synchronizedFields);
     console.log('lensFilters', lensFilters);
+    console.log('synchronizedFilters', synchronizedFilters);
     console.log('lensTimeRange', lensTimeRange);
     console.log('lensQuery', lensQuery);
     console.log('filterFields', filterFields);
+
+    // Build KQL query with only synchronized fields
+    let synchronizedKQLQuery = '';
+    if (lensQuery && typeof lensQuery.query === 'string' && lensQuery.query.trim()) {
+      synchronizedKQLQuery = buildSynchronizedKQLQuery(lensQuery.query, config.synchronizedFields);
+      
+      console.log('Original query:', lensQuery.query);
+      console.log('Synchronized query:', synchronizedKQLQuery);
+    }
+    
+    // Combine the synchronized Lens query with our logs-specific filter
+    let combinedQuery = 'log.level: *';
+    if (synchronizedKQLQuery) {
+      combinedQuery = `(${synchronizedKQLQuery}) AND log.level: *`;
+    }
 
     try {
       const logsDataView = await this.getOrCreateLogsDataView();
@@ -326,10 +560,12 @@ export class OpenLogsInDiscoverDrilldown
       discoveryColumns.add('message');
       discoveryColumns.add('log.level');
       
-      // Add configured field name if provided
-      if (config.fieldName && config.fieldName.trim()) {
-        discoveryColumns.add(config.fieldName.trim());
-      }
+      // Add configured field names if provided
+      config.fieldNames.forEach(fieldName => {
+        if (fieldName && fieldName.trim()) {
+          discoveryColumns.add(fieldName.trim());
+        }
+      });
       
       // Add field names from structured filters that are allowed
       filterFields.forEach(fieldInfo => {
@@ -338,24 +574,6 @@ export class OpenLogsInDiscoverDrilldown
         }
       });
 
-      // Filter the Lens query to only keep allowed fields and collect field names
-      let filteredLensQuery = '';
-      if (lensQuery && typeof lensQuery.query === 'string' && lensQuery.query.trim()) {
-        const result = filterKQLQuery(lensQuery.query);
-        filteredLensQuery = result.filteredQuery;
-        
-        // Add field names from the query to our columns
-        result.keptFields.forEach(field => discoveryColumns.add(field));
-        
-        console.log('Original query:', lensQuery.query);
-        console.log('Filtered query:', filteredLensQuery);
-      }
-      
-      // Combine the filtered Lens query with our logs-specific filter
-      let combinedQuery = 'log.level: *';
-      if (filteredLensQuery) {
-        combinedQuery = `(${filteredLensQuery}) AND log.level: *`;
-      }
       
       const columnsArray = Array.from(discoveryColumns);
       console.log('Discover columns:', columnsArray);
@@ -363,7 +581,7 @@ export class OpenLogsInDiscoverDrilldown
       return await locator.getRedirectUrl({
         indexPatternId: logsDataView.id!,
         timeRange: lensTimeRange,
-        filters: lensFilters,
+        filters: synchronizedFilters,
         query: {
           language: 'kuery',
           query: combinedQuery,
@@ -376,10 +594,10 @@ export class OpenLogsInDiscoverDrilldown
       return await locator.getRedirectUrl({
         indexPatternId: 'logs-apm*',
         timeRange: lensTimeRange,
-        filters: lensFilters,
+        filters: synchronizedFilters,
         query: {
           language: 'kuery',
-          query: 'log.level: *',
+          query: combinedQuery,
         },
       });
     }
