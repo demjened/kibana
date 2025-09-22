@@ -14,7 +14,7 @@ import type {
   UiActionsEnhancedDrilldownDefinition as Drilldown,
   UiActionsEnhancedBaseActionFactoryContext as BaseActionFactoryContext,
 } from '@kbn/ui-actions-enhanced-plugin/public';
-import { EuiFormRow, EuiSwitch, EuiFieldText, EuiButton, EuiButtonIcon, EuiFlexGroup, EuiFlexItem, EuiSpacer, EuiCheckbox } from '@elastic/eui';
+import { EuiFormRow, EuiSwitch, EuiFieldText, EuiButton, EuiButtonIcon, EuiFlexGroup, EuiFlexItem, EuiSpacer, EuiButtonGroup } from '@elastic/eui';
 import type { ApplyGlobalFilterActionContext } from '@kbn/unified-search-plugin/public';
 import { i18n } from '@kbn/i18n';
 import type { DataViewsService } from '@kbn/data-views-plugin/public';
@@ -212,6 +212,25 @@ function extractSynchronizedFilters(filters: Filter[], synchronizedFields: strin
   });
 }
 
+// Helper function to create existence (wildcard) filters for specified fields
+function createExistenceFilters(existsFields: string[]): Filter[] {
+  return existsFields.map(fieldName => ({
+    meta: {
+      alias: null,
+      disabled: false,
+      key: fieldName,
+      negate: false,
+      params: {},
+      type: 'exists',
+    },
+    query: {
+      exists: {
+        field: fieldName,
+      },
+    },
+  }));
+}
+
 // Helper function to build KQL query with only synchronized fields
 function buildSynchronizedKQLQuery(queryString: string, synchronizedFields: string[]): string {
   if (!queryString || typeof queryString !== 'string' || synchronizedFields.length === 0) {
@@ -297,6 +316,7 @@ export interface Config extends SerializableRecord {
   openInNewTab: boolean;
   fieldNames: string[];
   synchronizedFields: string[]; // Fields that should carry over filter criteria
+  existsFields: string[]; // Fields that should have existence (wildcard) filters
 }
 
 // Core log fields that are always included and not editable
@@ -343,7 +363,8 @@ export class OpenLogsInDiscoverDrilldown
           onConfig({ 
             ...config, 
             fieldNames: allFields,
-            synchronizedFields: initialFields // Only sync the extracted fields, not core fields
+            synchronizedFields: initialFields, // Only sync the extracted fields, not core fields
+            existsFields: [] // No existence filters by default for auto-populated fields
           });
         }
       }
@@ -365,7 +386,13 @@ export class OpenLogsInDiscoverDrilldown
       
       const newFieldNames = config.fieldNames.filter((_, index) => index !== indexToRemove);
       const newSynchronizedFields = config.synchronizedFields.filter(field => field !== fieldToRemove);
-      onConfig({ ...config, fieldNames: newFieldNames, synchronizedFields: newSynchronizedFields });
+      const newExistsFields = config.existsFields.filter(field => field !== fieldToRemove);
+      onConfig({ 
+        ...config, 
+        fieldNames: newFieldNames, 
+        synchronizedFields: newSynchronizedFields,
+        existsFields: newExistsFields
+      });
     };
 
     const updateField = (index: number, value: string) => {
@@ -380,31 +407,62 @@ export class OpenLogsInDiscoverDrilldown
       const oldFieldName = newFieldNames[index];
       newFieldNames[index] = value;
       
-      // Update synchronized fields array if the field name changed
+      // Update both synchronized and exists fields arrays if the field name changed
       const newSynchronizedFields = config.synchronizedFields.map(field => 
         field === oldFieldName ? value : field
       );
+      const newExistsFields = config.existsFields.map(field => 
+        field === oldFieldName ? value : field
+      );
       
-      onConfig({ ...config, fieldNames: newFieldNames, synchronizedFields: newSynchronizedFields });
+      onConfig({ 
+        ...config, 
+        fieldNames: newFieldNames, 
+        synchronizedFields: newSynchronizedFields,
+        existsFields: newExistsFields
+      });
     };
 
-    const toggleSynchronization = (fieldName: string, checked: boolean) => {
-      // Prevent toggling synchronization for core fields
+    const handleFieldStateChange = (fieldName: string, selectedOption: string) => {
+      // Prevent changing state for core fields
       if (CORE_LOG_FIELDS.includes(fieldName as any)) {
         return;
       }
       
-      let newSynchronizedFields;
-      if (checked) {
-        // Add to synchronized fields if not already present
-        newSynchronizedFields = config.synchronizedFields.includes(fieldName) 
-          ? config.synchronizedFields 
-          : [...config.synchronizedFields, fieldName];
-      } else {
-        // Remove from synchronized fields
-        newSynchronizedFields = config.synchronizedFields.filter(field => field !== fieldName);
+      const currentState = getFieldState(fieldName);
+      
+      // If clicking the same button that's already selected, unselect it
+      const finalSelection = currentState === selectedOption ? '' : selectedOption;
+      
+      let newSynchronizedFields = [...config.synchronizedFields];
+      let newExistsFields = [...config.existsFields];
+      
+      // Remove field from both arrays first
+      newSynchronizedFields = newSynchronizedFields.filter(field => field !== fieldName);
+      newExistsFields = newExistsFields.filter(field => field !== fieldName);
+      
+      // Add to appropriate array based on final selection
+      if (finalSelection === 'sync') {
+        newSynchronizedFields.push(fieldName);
+      } else if (finalSelection === 'exists') {
+        newExistsFields.push(fieldName);
       }
-      onConfig({ ...config, synchronizedFields: newSynchronizedFields });
+      // If finalSelection is empty string, field stays in neither array (unselected)
+      
+      onConfig({ 
+        ...config, 
+        synchronizedFields: newSynchronizedFields,
+        existsFields: newExistsFields
+      });
+    };
+
+    const getFieldState = (fieldName: string): string => {
+      if (config.synchronizedFields.includes(fieldName)) {
+        return 'sync';
+      } else if (config.existsFields.includes(fieldName)) {
+        return 'exists';
+      }
+      return ''; // Neither selected
     };
 
     return (
@@ -414,7 +472,7 @@ export class OpenLogsInDiscoverDrilldown
             defaultMessage: 'Additional fields to display',
           })}
           helpText={i18n.translate('xpack.lens.app.openLogsInDiscoverDrilldown.fieldNamesHelpText', {
-            defaultMessage: 'Specify additional field names to include in the Discover columns. Fields from your chart\'s filters and query are automatically included.',
+            defaultMessage: 'Specify additional field names to include in the Discover columns. Use "Sync" to copy filter criteria from your chart, or "Exists" to filter for records where the field has any value. Fields from your chart\'s filters and query are automatically included.',
           })}
         >
           <div>
@@ -436,15 +494,36 @@ export class OpenLogsInDiscoverDrilldown
                     />
                   </EuiFlexItem>
                   <EuiFlexItem grow={false}>
-                    <EuiCheckbox
-                      id={`sync-${index}`}
-                      label={i18n.translate('xpack.lens.app.openLogsInDiscoverDrilldown.synchronizeLabel', {
-                        defaultMessage: 'Sync filters',
+                    <EuiButtonGroup
+                      legend={i18n.translate('xpack.lens.app.openLogsInDiscoverDrilldown.fieldStateLegend', {
+                        defaultMessage: 'Field behavior',
                       })}
-                      checked={config.synchronizedFields.includes(fieldName)}
-                      onChange={(e) => toggleSynchronization(fieldName, e.target.checked)}
-                      data-test-subj={`openLogsInDiscoverDrilldownSyncField-${index}`}
-                      disabled={isCoreField}
+                      options={[
+                        {
+                          id: 'sync',
+                          label: i18n.translate('xpack.lens.app.openLogsInDiscoverDrilldown.syncLabel', {
+                            defaultMessage: 'Filter',
+                          }),
+                          toolTipContent: i18n.translate('xpack.lens.app.openLogsInDiscoverDrilldown.syncTooltip', {
+                            defaultMessage: 'Sync filter criteria from the chart',
+                          }),
+                        },
+                        {
+                          id: 'exists',
+                          label: i18n.translate('xpack.lens.app.openLogsInDiscoverDrilldown.existsLabel', {
+                            defaultMessage: 'Exists',
+                          }),
+                          toolTipContent: i18n.translate('xpack.lens.app.openLogsInDiscoverDrilldown.existsTooltip', {
+                            defaultMessage: 'Filter to show only records where this field exists',
+                          }),
+                        },
+                      ]}
+                      idSelected={getFieldState(fieldName)}
+                      onChange={(selectedOption) => handleFieldStateChange(fieldName, selectedOption)}
+                      type="single"
+                      buttonSize="s"
+                      isDisabled={isCoreField}
+                      data-test-subj={`openLogsInDiscoverDrilldownFieldState-${index}`}
                     />
                   </EuiFlexItem>
                   <EuiFlexItem grow={false}>
@@ -497,6 +576,7 @@ export class OpenLogsInDiscoverDrilldown
     openInNewTab: true,
     fieldNames: [...CORE_LOG_FIELDS], // Include core fields by default
     synchronizedFields: [], // Core fields are NOT synchronized by default
+    existsFields: [], // No fields have existence filters by default
   });
 
   public readonly isConfigValid = (config: Config): config is Config => {
@@ -556,14 +636,19 @@ export class OpenLogsInDiscoverDrilldown
       }
     }
 
-    // Extract only synchronized filters and field conditions
+    // Extract synchronized filters and create existence filters
     const synchronizedFilters = extractSynchronizedFilters(lensFilters, config.synchronizedFields);
+    const existenceFilters = createExistenceFilters(config.existsFields);
+    const allFilters = [...synchronizedFilters, ...existenceFilters];
     const filterFields = extractFieldsFromFilters(synchronizedFilters);
 
     console.log('OpenLogsInDiscoverDrilldown -> getHref()');
     console.log('config.synchronizedFields', config.synchronizedFields);
+    console.log('config.existsFields', config.existsFields);
     console.log('lensFilters', lensFilters);
     console.log('synchronizedFilters', synchronizedFilters);
+    console.log('existenceFilters', existenceFilters);
+    console.log('allFilters', allFilters);
     console.log('lensTimeRange', lensTimeRange);
     console.log('lensQuery', lensQuery);
     console.log('filterFields', filterFields);
@@ -612,7 +697,7 @@ export class OpenLogsInDiscoverDrilldown
       
       // Set default widths for specific log fields
       if (columnsArray.includes('@timestamp')) {
-        gridColumns['@timestamp'] = { width: 200 };
+        gridColumns['@timestamp'] = { width: 220 };
       }
       if (columnsArray.includes('log.level')) {
         gridColumns['log.level'] = { width: 80 };
@@ -624,7 +709,7 @@ export class OpenLogsInDiscoverDrilldown
       return await locator.getRedirectUrl({
         indexPatternId: logsDataView.id!,
         timeRange: lensTimeRange,
-        filters: synchronizedFilters,
+        filters: allFilters,
         query: {
           language: 'kuery',
           query: combinedQuery,
@@ -637,7 +722,7 @@ export class OpenLogsInDiscoverDrilldown
       console.warn('Could not create/find data view for logs-apm*:', error);
       // Configure column widths for fallback case too
       const gridColumns: Record<string, { width?: number }> = {};
-      gridColumns['@timestamp'] = { width: 200 };
+      gridColumns['@timestamp'] = { width: 220 };
       gridColumns['log.level'] = { width: 80 };
       // Note: service.name may not be available in fallback, but include it anyway
       gridColumns['service.name'] = { width: 150 };
@@ -645,7 +730,7 @@ export class OpenLogsInDiscoverDrilldown
       return await locator.getRedirectUrl({
         indexPatternId: 'logs-apm*',
         timeRange: lensTimeRange,
-        filters: synchronizedFilters,
+        filters: allFilters,
         query: {
           language: 'kuery',
           query: combinedQuery,
