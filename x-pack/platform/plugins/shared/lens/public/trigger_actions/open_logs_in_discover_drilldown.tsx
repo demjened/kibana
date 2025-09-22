@@ -14,7 +14,7 @@ import type {
   UiActionsEnhancedDrilldownDefinition as Drilldown,
   UiActionsEnhancedBaseActionFactoryContext as BaseActionFactoryContext,
 } from '@kbn/ui-actions-enhanced-plugin/public';
-import { EuiFormRow, EuiSwitch } from '@elastic/eui';
+import { EuiFormRow, EuiSwitch, EuiFieldText } from '@elastic/eui';
 import type { ApplyGlobalFilterActionContext } from '@kbn/unified-search-plugin/public';
 import { i18n } from '@kbn/i18n';
 import type { DataViewsService } from '@kbn/data-views-plugin/public';
@@ -178,6 +178,7 @@ export type ActionContext = ApplyGlobalFilterActionContext & {
 
 export interface Config extends SerializableRecord {
   openInNewTab: boolean;
+  fieldName?: string;
 }
 
 export type OpenLogsInDiscoverTrigger = typeof APPLY_FILTER_TRIGGER;
@@ -207,18 +208,37 @@ export class OpenLogsInDiscoverDrilldown
 
   private readonly ReactCollectConfig: React.FC<CollectConfigProps> = ({ config, onConfig }) => {
     return (
-      <EuiFormRow hasChildLabel={false}>
-        <EuiSwitch
-          id="openInNewTab"
-          name="openInNewTab"
-          label={i18n.translate('xpack.lens.app.openLogsInDiscoverDrilldown.newTabConfig', {
-            defaultMessage: 'Open in new tab',
+      <>
+        <EuiFormRow
+          label={i18n.translate('xpack.lens.app.openLogsInDiscoverDrilldown.fieldNameConfig', {
+            defaultMessage: 'Additional field to display',
           })}
-          checked={config.openInNewTab}
-          onChange={() => onConfig({ ...config, openInNewTab: !config.openInNewTab })}
-          data-test-subj="openLogsInDiscoverDrilldownOpenInNewTab"
-        />
-      </EuiFormRow>
+          helpText={i18n.translate('xpack.lens.app.openLogsInDiscoverDrilldown.fieldNameHelpText', {
+            defaultMessage: 'Specify an additional field name to include in the Discover columns (optional)',
+          })}
+        >
+          <EuiFieldText
+            placeholder={i18n.translate('xpack.lens.app.openLogsInDiscoverDrilldown.fieldNamePlaceholder', {
+              defaultMessage: 'e.g., service.version',
+            })}
+            value={config.fieldName || ''}
+            onChange={(e) => onConfig({ ...config, fieldName: e.target.value })}
+            data-test-subj="openLogsInDiscoverDrilldownFieldName"
+          />
+        </EuiFormRow>
+        <EuiFormRow hasChildLabel={false}>
+          <EuiSwitch
+            id="openInNewTab"
+            name="openInNewTab"
+            label={i18n.translate('xpack.lens.app.openLogsInDiscoverDrilldown.newTabConfig', {
+              defaultMessage: 'Open in new tab',
+            })}
+            checked={config.openInNewTab}
+            onChange={() => onConfig({ ...config, openInNewTab: !config.openInNewTab })}
+            data-test-subj="openLogsInDiscoverDrilldownOpenInNewTab"
+          />
+        </EuiFormRow>
+      </>
     );
   };
 
@@ -226,6 +246,7 @@ export class OpenLogsInDiscoverDrilldown
 
   public readonly createConfig = () => ({
     openInNewTab: true,
+    fieldName: '',
   });
 
   public readonly isConfigValid = (config: Config): config is Config => {
@@ -304,6 +325,11 @@ export class OpenLogsInDiscoverDrilldown
       discoveryColumns.add('@timestamp');
       discoveryColumns.add('message');
       discoveryColumns.add('log.level');
+      
+      // Add configured field name if provided
+      if (config.fieldName && config.fieldName.trim()) {
+        discoveryColumns.add(config.fieldName.trim());
+      }
       
       // Add field names from structured filters that are allowed
       filterFields.forEach(fieldInfo => {
