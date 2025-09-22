@@ -299,6 +299,9 @@ export interface Config extends SerializableRecord {
   synchronizedFields: string[]; // Fields that should carry over filter criteria
 }
 
+// Core log fields that are always included and not editable
+const CORE_LOG_FIELDS = ['@timestamp', 'log.level', 'message'] as const;
+
 export type OpenLogsInDiscoverTrigger = typeof APPLY_FILTER_TRIGGER;
 
 export type ActionFactoryContext = BaseActionFactoryContext & ActionContext;
@@ -327,15 +330,20 @@ export class OpenLogsInDiscoverDrilldown
   private readonly ReactCollectConfig: React.FC<CollectConfigProps> = ({ config, onConfig, context }) => {
     // Auto-populate fields from chart context when creating a new drilldown
     useEffect(() => {
-      // Only populate if fieldNames is empty (new drilldown) and context is available
-      if (config.fieldNames.length === 0 && context) {
+      // Only populate if we have only core fields (new drilldown) and context is available
+      const hasOnlyCoreFields = config.fieldNames.length === CORE_LOG_FIELDS.length && 
+        CORE_LOG_FIELDS.every(field => config.fieldNames.includes(field));
+      
+      if (hasOnlyCoreFields && context) {
         const initialFields = extractInitialFieldNames(context);
         if (initialFields.length > 0) {
-          // Mark auto-populated fields as synchronized by default
+          // Combine core fields with auto-populated fields
+          const allFields = [...CORE_LOG_FIELDS, ...initialFields];
+          // Mark auto-populated fields (not core fields) as synchronized by default
           onConfig({ 
             ...config, 
-            fieldNames: initialFields,
-            synchronizedFields: initialFields 
+            fieldNames: allFields,
+            synchronizedFields: initialFields // Only sync the extracted fields, not core fields
           });
         }
       }
@@ -348,13 +356,26 @@ export class OpenLogsInDiscoverDrilldown
     };
 
     const removeField = (indexToRemove: number) => {
-      const newFieldNames = config.fieldNames.filter((_, index) => index !== indexToRemove);
       const fieldToRemove = config.fieldNames[indexToRemove];
+      
+      // Prevent removal of core fields
+      if (CORE_LOG_FIELDS.includes(fieldToRemove as any)) {
+        return;
+      }
+      
+      const newFieldNames = config.fieldNames.filter((_, index) => index !== indexToRemove);
       const newSynchronizedFields = config.synchronizedFields.filter(field => field !== fieldToRemove);
       onConfig({ ...config, fieldNames: newFieldNames, synchronizedFields: newSynchronizedFields });
     };
 
     const updateField = (index: number, value: string) => {
+      const currentFieldName = config.fieldNames[index];
+      
+      // Prevent editing of core fields
+      if (CORE_LOG_FIELDS.includes(currentFieldName as any)) {
+        return;
+      }
+      
       const newFieldNames = [...config.fieldNames];
       const oldFieldName = newFieldNames[index];
       newFieldNames[index] = value;
@@ -368,6 +389,11 @@ export class OpenLogsInDiscoverDrilldown
     };
 
     const toggleSynchronization = (fieldName: string, checked: boolean) => {
+      // Prevent toggling synchronization for core fields
+      if (CORE_LOG_FIELDS.includes(fieldName as any)) {
+        return;
+      }
+      
       let newSynchronizedFields;
       if (checked) {
         // Add to synchronized fields if not already present
@@ -392,42 +418,50 @@ export class OpenLogsInDiscoverDrilldown
           })}
         >
           <div>
-            {config.fieldNames.map((fieldName, index) => (
-              <EuiFlexGroup key={index} alignItems="center" gutterSize="s">
-                <EuiFlexItem>
-                  <EuiFieldText
-                    placeholder={i18n.translate('xpack.lens.app.openLogsInDiscoverDrilldown.fieldNamePlaceholder', {
-                      defaultMessage: 'e.g., service.version',
-                    })}
-                    value={fieldName}
-                    onChange={(e) => updateField(index, e.target.value)}
-                    data-test-subj={`openLogsInDiscoverDrilldownFieldName-${index}`}
-                  />
-                </EuiFlexItem>
-                <EuiFlexItem grow={false}>
-                  <EuiCheckbox
-                    id={`sync-${index}`}
-                    label={i18n.translate('xpack.lens.app.openLogsInDiscoverDrilldown.synchronizeLabel', {
-                      defaultMessage: 'Sync filters',
-                    })}
-                    checked={config.synchronizedFields.includes(fieldName)}
-                    onChange={(e) => toggleSynchronization(fieldName, e.target.checked)}
-                    data-test-subj={`openLogsInDiscoverDrilldownSyncField-${index}`}
-                  />
-                </EuiFlexItem>
-                <EuiFlexItem grow={false}>
-                  <EuiButtonIcon
-                    iconType="cross"
-                    color="danger"
-                    onClick={() => removeField(index)}
-                    aria-label={i18n.translate('xpack.lens.app.openLogsInDiscoverDrilldown.removeFieldAriaLabel', {
-                      defaultMessage: 'Remove field',
-                    })}
-                    data-test-subj={`openLogsInDiscoverDrilldownRemoveField-${index}`}
-                  />
-                </EuiFlexItem>
-              </EuiFlexGroup>
-            ))}
+            {config.fieldNames.map((fieldName, index) => {
+              const isCoreField = CORE_LOG_FIELDS.includes(fieldName as any);
+              
+              return (
+                <EuiFlexGroup key={index} alignItems="center" gutterSize="s">
+                  <EuiFlexItem>
+                    <EuiFieldText
+                      placeholder={i18n.translate('xpack.lens.app.openLogsInDiscoverDrilldown.fieldNamePlaceholder', {
+                        defaultMessage: 'e.g., service.version',
+                      })}
+                      value={fieldName}
+                      onChange={(e) => updateField(index, e.target.value)}
+                      data-test-subj={`openLogsInDiscoverDrilldownFieldName-${index}`}
+                      disabled={isCoreField}
+                      readOnly={isCoreField}
+                    />
+                  </EuiFlexItem>
+                  <EuiFlexItem grow={false}>
+                    <EuiCheckbox
+                      id={`sync-${index}`}
+                      label={i18n.translate('xpack.lens.app.openLogsInDiscoverDrilldown.synchronizeLabel', {
+                        defaultMessage: 'Sync filters',
+                      })}
+                      checked={config.synchronizedFields.includes(fieldName)}
+                      onChange={(e) => toggleSynchronization(fieldName, e.target.checked)}
+                      data-test-subj={`openLogsInDiscoverDrilldownSyncField-${index}`}
+                      disabled={isCoreField}
+                    />
+                  </EuiFlexItem>
+                  <EuiFlexItem grow={false}>
+                    <EuiButtonIcon
+                      iconType="cross"
+                      color="danger"
+                      onClick={() => removeField(index)}
+                      aria-label={i18n.translate('xpack.lens.app.openLogsInDiscoverDrilldown.removeFieldAriaLabel', {
+                        defaultMessage: 'Remove field',
+                      })}
+                      data-test-subj={`openLogsInDiscoverDrilldownRemoveField-${index}`}
+                      disabled={isCoreField}
+                    />
+                  </EuiFlexItem>
+                </EuiFlexGroup>
+              );
+            })}
             <EuiSpacer size="s" />
             <EuiButton
               iconType="plus"
@@ -461,8 +495,8 @@ export class OpenLogsInDiscoverDrilldown
 
   public readonly createConfig = () => ({
     openInNewTab: true,
-    fieldNames: [],
-    synchronizedFields: [],
+    fieldNames: [...CORE_LOG_FIELDS], // Include core fields by default
+    synchronizedFields: [], // Core fields are NOT synchronized by default
   });
 
   public readonly isConfigValid = (config: Config): config is Config => {
@@ -555,12 +589,7 @@ export class OpenLogsInDiscoverDrilldown
       // Collect all field names we want to show as columns
       const discoveryColumns = new Set<string>();
       
-      // Always include core log fields that are useful for analysis
-      discoveryColumns.add('@timestamp');
-      discoveryColumns.add('message');
-      discoveryColumns.add('log.level');
-      
-      // Add configured field names if provided
+      // Add configured field names (includes core fields and user-defined fields)
       config.fieldNames.forEach(fieldName => {
         if (fieldName && fieldName.trim()) {
           discoveryColumns.add(fieldName.trim());
@@ -582,6 +611,9 @@ export class OpenLogsInDiscoverDrilldown
       const gridColumns: Record<string, { width?: number }> = {};
       
       // Set default widths for specific log fields
+      if (columnsArray.includes('@timestamp')) {
+        gridColumns['@timestamp'] = { width: 200 };
+      }
       if (columnsArray.includes('log.level')) {
         gridColumns['log.level'] = { width: 80 };
       }
@@ -605,6 +637,7 @@ export class OpenLogsInDiscoverDrilldown
       console.warn('Could not create/find data view for logs-apm*:', error);
       // Configure column widths for fallback case too
       const gridColumns: Record<string, { width?: number }> = {};
+      gridColumns['@timestamp'] = { width: 200 };
       gridColumns['log.level'] = { width: 80 };
       // Note: service.name may not be available in fallback, but include it anyway
       gridColumns['service.name'] = { width: 150 };
