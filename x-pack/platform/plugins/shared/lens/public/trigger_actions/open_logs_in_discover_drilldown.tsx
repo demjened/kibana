@@ -578,6 +578,17 @@ export class OpenLogsInDiscoverDrilldown
       const columnsArray = Array.from(discoveryColumns);
       console.log('Discover columns:', columnsArray);
       
+      // Configure column widths for better log viewing
+      const gridColumns: Record<string, { width?: number }> = {};
+      
+      // Set default widths for specific log fields
+      if (columnsArray.includes('log.level')) {
+        gridColumns['log.level'] = { width: 80 };
+      }
+      if (columnsArray.includes('service.name')) {
+        gridColumns['service.name'] = { width: 150 };
+      }
+      
       return await locator.getRedirectUrl({
         indexPatternId: logsDataView.id!,
         timeRange: lensTimeRange,
@@ -587,10 +598,17 @@ export class OpenLogsInDiscoverDrilldown
           query: combinedQuery,
         },
         columns: columnsArray,
+        grid: Object.keys(gridColumns).length > 0 ? { columns: gridColumns } : undefined,
       });
     } catch (error) {
       // Fallback to using the index pattern directly
       console.warn('Could not create/find data view for logs-apm*:', error);
+      // Configure column widths for fallback case too
+      const gridColumns: Record<string, { width?: number }> = {};
+      gridColumns['log.level'] = { width: 80 };
+      // Note: service.name may not be available in fallback, but include it anyway
+      gridColumns['service.name'] = { width: 150 };
+      
       return await locator.getRedirectUrl({
         indexPatternId: 'logs-apm*',
         timeRange: lensTimeRange,
@@ -599,6 +617,7 @@ export class OpenLogsInDiscoverDrilldown
           language: 'kuery',
           query: combinedQuery,
         },
+        grid: { columns: gridColumns },
       });
     }
   };
