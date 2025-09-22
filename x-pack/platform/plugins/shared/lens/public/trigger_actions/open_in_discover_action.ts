@@ -87,32 +87,37 @@ function shouldKeepField(fieldName: string): boolean {
 }
 
 // Helper function to filter KQL query to only keep allowed fields
-function filterKQLQuery(queryString: string): string {
+function filterKQLQuery(queryString: string): { filteredQuery: string; keptFields: string[] } {
   if (!queryString || typeof queryString !== 'string') {
-    return '';
+    return { filteredQuery: '', keptFields: [] };
   }
   
   try {
     const ast = fromKueryExpression(queryString);
-    const filteredAst = filterASTNode(ast);
+    const keptFields = new Set<string>();
+    const filteredAst = filterASTNode(ast, keptFields);
 
     console.log('filteredAst', filteredAst);
+    console.log('keptFields from query', Array.from(keptFields));
     
     // If filtering resulted in no valid conditions, return empty string
     if (!filteredAst) {
-      return '';
+      return { filteredQuery: '', keptFields: Array.from(keptFields) };
     }
     
     // Use Kibana's built-in AST-to-KQL conversion
-    return toKqlExpression(filteredAst);
+    return { 
+      filteredQuery: toKqlExpression(filteredAst),
+      keptFields: Array.from(keptFields)
+    };
   } catch (error) {
     console.warn('Failed to filter KQL query:', error);
-    return '';
+    return { filteredQuery: '', keptFields: [] };
   }
 }
 
 // Recursively filter AST nodes to keep only allowed fields
-function filterASTNode(node: any): any {
+function filterASTNode(node: any, keptFields: Set<string>): any {
   if (!node) return null;
 
   console.log('filterASTNode -> node type:', node.type, 'value:', node.value, 'function:', node.function);
@@ -120,7 +125,7 @@ function filterASTNode(node: any): any {
   // Handle different node types
   switch (node.type) {
     case 'function':
-      return filterFunctionNode(node);
+      return filterFunctionNode(node, keptFields);
     case 'literal':
       // Keep literals as they might be values, not field names
       return node;
@@ -135,7 +140,7 @@ function filterASTNode(node: any): any {
 }
 
 // Filter function nodes (like 'and', 'or', field operations)
-function filterFunctionNode(node: any): any {
+function filterFunctionNode(node: any, keptFields: Set<string>): any {
   if (!node.function) return null;
 
   console.log('filterFunctionNode -> node', node.function);
@@ -145,7 +150,7 @@ function filterFunctionNode(node: any): any {
     case 'or':
       // Filter child arguments and keep only valid ones
       const filteredArgs = node.arguments
-        .map((arg: any) => filterASTNode(arg))
+        .map((arg: any) => filterASTNode(arg, keptFields))
         .filter((arg: any) => arg !== null);
       
       if (filteredArgs.length === 0) {
@@ -167,6 +172,7 @@ function filterFunctionNode(node: any): any {
       console.log('filterFunctionNode -> field operation', node.function, 'field:', fieldName);
       if (fieldName && shouldKeepField(fieldName)) {
         console.log('-> keeping field:', fieldName);
+        keptFields.add(fieldName); // Track this field for columns
         return node;
       }
       console.log('-> filtering out field:', fieldName);
@@ -176,6 +182,7 @@ function filterFunctionNode(node: any): any {
       // For other functions, try to extract field name and check
       const field = getFieldNameFromOperation(node);
       if (field && shouldKeepField(field)) {
+        keptFields.add(field); // Track this field for columns
         return node;
       }
       return null;
@@ -238,10 +245,30 @@ async function buildLogsDiscoverUrl(
 
   const logsDataView = await getOrCreateLogsDataView(dataViews);
 
-  // Filter the Lens query to only keep allowed fields
+  // Collect all field names we want to show as columns
+  const discoveryColumns = new Set<string>();
+  
+  // Always include core log fields that are useful for analysis
+  discoveryColumns.add('@timestamp');
+  discoveryColumns.add('message');
+  discoveryColumns.add('log.level');
+  
+  // Add field names from structured filters that are allowed
+  filterFields.forEach(fieldInfo => {
+    if (shouldKeepField(fieldInfo.field)) {
+      discoveryColumns.add(fieldInfo.field);
+    }
+  });
+
+  // Filter the Lens query to only keep allowed fields and collect field names
   let filteredLensQuery = '';
   if (lensQuery && typeof lensQuery.query === 'string' && lensQuery.query.trim()) {
-    filteredLensQuery = filterKQLQuery(lensQuery.query);
+    const result = filterKQLQuery(lensQuery.query);
+    filteredLensQuery = result.filteredQuery;
+    
+    // Add field names from the query to our columns
+    result.keptFields.forEach(field => discoveryColumns.add(field));
+    
     console.log('Original query:', lensQuery.query);
     console.log('Filtered query:', filteredLensQuery);
   }
@@ -251,6 +278,9 @@ async function buildLogsDiscoverUrl(
   if (filteredLensQuery) {
     combinedQuery = `(${filteredLensQuery}) AND log.level: *`;
   }
+  
+  const columnsArray = Array.from(discoveryColumns);
+  console.log('Discover columns:', columnsArray);
 
   // Use the Discover locator directly with the logs-apm* index pattern
   const discoverUrl = await locator?.getRedirectUrl({
@@ -261,6 +291,7 @@ async function buildLogsDiscoverUrl(
       language: 'kuery',
       query: combinedQuery,
     },
+    columns: columnsArray,
   });
 
   return discoverUrl || '';
