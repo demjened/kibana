@@ -11,6 +11,260 @@ import type { DataViewsService } from '@kbn/data-views-plugin/public';
 import { map } from 'rxjs';
 import type { DiscoverAppLocator } from './open_in_discover_helpers';
 import { LensApi } from '../react_embeddable/types';
+import { isLensApi } from '../react_embeddable/type_guards';
+import type { Filter, Query } from '@kbn/es-query';
+import { fromKueryExpression, getKqlFieldNames, toKqlExpression } from '@kbn/es-query';
+
+
+// Find or create a data view for logs-apm*
+const getOrCreateLogsDataView = async (dataViews: Pick<DataViewsService, 'get' | 'find' | 'create'>) => {
+  let logsDataView;
+  try {
+    const existingDataViews = await dataViews.find('logs-apm*', 1);
+    if (existingDataViews.length > 0) {
+      logsDataView = existingDataViews[0];
+    } else {
+      // Create a temporary data view for logs-apm*
+      console.log('creating data view for logs-apm*');
+      logsDataView = await dataViews.create({
+        title: 'logs-apm*',
+        timeFieldName: '@timestamp',
+      });
+    }
+  } catch (error) {
+    // If we can't create/find the data view, fall back to using the pattern directly
+    console.warn('Could not create data view for logs-apm*:', error);
+  }
+  return logsDataView;
+};
+
+// Helper function to extract field information from structured filters
+function extractFieldsFromFilters(filters: Filter[]) {
+  const fieldInfo: Array<{ field: string; type: string; value?: any }> = [];
+  
+  filters.forEach(filter => {
+    if (filter.meta?.key) {
+      fieldInfo.push({
+        field: filter.meta.key,
+        type: filter.meta.type || 'unknown',
+        value: filter.meta.params || filter.query,
+      });
+    }
+  });
+  
+  return fieldInfo;
+}
+
+// Helper function to extract field names from KQL query string
+function extractFieldsFromKQL(queryString: string) {
+  if (!queryString || typeof queryString !== 'string') {
+    return [];
+  }
+  
+  try {
+    const ast = fromKueryExpression(queryString);
+    return getKqlFieldNames(ast);
+  } catch (error) {
+    console.warn('Failed to parse KQL query:', error);
+    return [];
+  }
+}
+
+// Helper function to check if a field should be kept
+function shouldKeepField(fieldName: string): boolean {
+  const allowedPatterns = [
+    'service.name',
+    /^labels\./,
+    /^numeric_labels\./,
+  ];
+  
+  return allowedPatterns.some(pattern => {
+    if (typeof pattern === 'string') {
+      return fieldName === pattern;
+    }
+    return pattern.test(fieldName);
+  });
+}
+
+// Helper function to filter KQL query to only keep allowed fields
+function filterKQLQuery(queryString: string): string {
+  if (!queryString || typeof queryString !== 'string') {
+    return '';
+  }
+  
+  try {
+    const ast = fromKueryExpression(queryString);
+    const filteredAst = filterASTNode(ast);
+
+    console.log('filteredAst', filteredAst);
+    
+    // If filtering resulted in no valid conditions, return empty string
+    if (!filteredAst) {
+      return '';
+    }
+    
+    // Use Kibana's built-in AST-to-KQL conversion
+    return toKqlExpression(filteredAst);
+  } catch (error) {
+    console.warn('Failed to filter KQL query:', error);
+    return '';
+  }
+}
+
+// Recursively filter AST nodes to keep only allowed fields
+function filterASTNode(node: any): any {
+  if (!node) return null;
+
+  console.log('filterASTNode -> node type:', node.type, 'value:', node.value, 'function:', node.function);
+  
+  // Handle different node types
+  switch (node.type) {
+    case 'function':
+      return filterFunctionNode(node);
+    case 'literal':
+      // Keep literals as they might be values, not field names
+      return node;
+    case 'wildcard':
+      // Keep wildcard nodes (like * in field: *)
+      console.log('filterASTNode -> keeping wildcard node:', node);
+      return node;
+    default:
+      console.log('filterASTNode -> keeping unknown node type:', node.type);
+      return node;
+  }
+}
+
+// Filter function nodes (like 'and', 'or', field operations)
+function filterFunctionNode(node: any): any {
+  if (!node.function) return null;
+
+  console.log('filterFunctionNode -> node', node.function);
+  
+  switch (node.function) {
+    case 'and':
+    case 'or':
+      // Filter child arguments and keep only valid ones
+      const filteredArgs = node.arguments
+        .map((arg: any) => filterASTNode(arg))
+        .filter((arg: any) => arg !== null);
+      
+      if (filteredArgs.length === 0) {
+        return null;
+      } else if (filteredArgs.length === 1) {
+        // If only one argument left, return it directly (flatten)
+        return filteredArgs[0];
+      } else {
+        return {
+          ...node,
+          arguments: filteredArgs,
+        };
+      }
+      
+    case 'is':
+    case 'range':
+      // These are field operations - check if field should be kept
+      const fieldName = getFieldNameFromOperation(node);
+      console.log('filterFunctionNode -> field operation', node.function, 'field:', fieldName);
+      if (fieldName && shouldKeepField(fieldName)) {
+        console.log('-> keeping field:', fieldName);
+        return node;
+      }
+      console.log('-> filtering out field:', fieldName);
+      return null;
+      
+    default:
+      // For other functions, try to extract field name and check
+      const field = getFieldNameFromOperation(node);
+      if (field && shouldKeepField(field)) {
+        return node;
+      }
+      return null;
+  }
+}
+
+// Extract field name from various operation types
+function getFieldNameFromOperation(node: any): string | null {
+  if (!node.arguments || node.arguments.length === 0) {
+    return null;
+  }
+  
+  // Field name is typically the first argument
+  const firstArg = node.arguments[0];
+  if (firstArg && firstArg.type === 'literal') {
+    return firstArg.value;
+  }
+  
+  return null;
+}
+
+
+// Shared function to build the discover URL for logs
+async function buildLogsDiscoverUrl(
+  context: EmbeddableApiContext,
+  locator: DiscoverAppLocator,
+  dataViews: Pick<DataViewsService, 'get' | 'find' | 'create'>
+): Promise<string> {
+  // Extract current filters and query from the Lens chart
+  let lensFilters: Filter[] = [];
+  let lensTimeRange = { from: 'now-24h', to: 'now' };
+  let lensQuery: Query | undefined = undefined;
+  
+  if (isLensApi(context.embeddable)) {
+    const viewArgs = context.embeddable.getViewUnderlyingDataArgs();
+    if (viewArgs) {
+      lensFilters = viewArgs.filters || [];
+      lensTimeRange = viewArgs.timeRange || lensTimeRange;
+      // Only handle regular Query type, not AggregateQuery
+      if (viewArgs.query && 'query' in viewArgs.query) {
+        lensQuery = viewArgs.query as Query;
+      }
+    }
+  }
+
+  // Extract field conditions from structured filters
+  const filterFields = extractFieldsFromFilters(lensFilters);
+
+  // Extract field conditions from KQL query
+  const queryFields = lensQuery && typeof lensQuery.query === 'string' 
+    ? extractFieldsFromKQL(lensQuery.query) 
+    : [];
+
+  console.log('--> buildLogsDiscoverUrl()');
+  console.log('lensFilters', lensFilters);
+  console.log('lensTimeRange', lensTimeRange);
+  console.log('lensQuery', lensQuery);
+  console.log('filterFields', filterFields);
+  console.log('queryFields', queryFields);
+
+  const logsDataView = await getOrCreateLogsDataView(dataViews);
+
+  // Filter the Lens query to only keep allowed fields
+  let filteredLensQuery = '';
+  if (lensQuery && typeof lensQuery.query === 'string' && lensQuery.query.trim()) {
+    filteredLensQuery = filterKQLQuery(lensQuery.query);
+    console.log('Original query:', lensQuery.query);
+    console.log('Filtered query:', filteredLensQuery);
+  }
+  
+  // Combine the filtered Lens query with our logs-specific filter
+  let combinedQuery = 'log.level: *';
+  if (filteredLensQuery) {
+    combinedQuery = `(${filteredLensQuery}) AND log.level: *`;
+  }
+
+  // Use the Discover locator directly with the logs-apm* index pattern
+  const discoverUrl = await locator?.getRedirectUrl({
+    indexPatternId: logsDataView?.id || 'logs-apm*',
+    timeRange: lensTimeRange,
+    filters: lensFilters,
+    query: {
+      language: 'kuery',
+      query: combinedQuery,
+    },
+  });
+
+  return discoverUrl || '';
+}
 
 const ACTION_OPEN_IN_DISCOVER = 'ACTION_OPEN_IN_DISCOVER';
 const ACTION_OPEN_LOGS_IN_DISCOVER = 'ACTION_OPEN_LOGS_IN_DISCOVER';
@@ -75,42 +329,8 @@ export const createOpenLogsInDiscoverAction = (
     order: 21,
     getIconType: () => 'discoverApp',
     getDisplayName: () => 'Open logs in Discover',
-    getHref: async () => {
-      // Find or create a data view for logs-apm*
-      let logsDataView;
-      try {
-        const existingDataViews = await dataViews.find('logs-apm*', 1);
-        console.log('existingDataViews', existingDataViews);
-        if (existingDataViews.length > 0) {
-          logsDataView = existingDataViews[0];
-        } else {
-          // Create a temporary data view for logs-apm*
-          console.log('creating data view for logs-apm*');
-          logsDataView = await dataViews.create({
-            title: 'logs-apm*',
-            timeFieldName: '@timestamp',
-          });
-        }
-        console.log('logsDataView', logsDataView);
-      } catch (error) {
-        // If we can't create/find the data view, fall back to using the pattern directly
-        console.warn('Could not create data view for logs-apm*:', error);
-      }
-
-      // Use the Discover locator directly with the logs-apm* index pattern
-      const discoverUrl = await locator?.getRedirectUrl({
-        indexPatternId: logsDataView?.id || 'logs-apm*',
-        timeRange: {
-          from: 'now-24h',
-          to: 'now',
-        },
-        query: {
-          language: 'kuery',
-          query: 'log.level: *',
-        },
-      });
-
-      return discoverUrl || '';
+    getHref: async (context: EmbeddableApiContext) => {
+      return buildLogsDiscoverUrl(context, locator, dataViews);
     },
     isCompatible: async (context: EmbeddableApiContext) => {
       const { isCompatible } = await getDiscoverHelpersAsync();
@@ -131,37 +351,8 @@ export const createOpenLogsInDiscoverAction = (
       return (embeddable as LensApi).canViewUnderlyingData$.pipe(map(() => undefined));
     },
     execute: async (context: EmbeddableApiContext) => {
-      // Find or create a data view for logs-apm*
-      let logsDataView;
-      try {
-        const existingDataViews = await dataViews.find('logs-apm*', 1);
-        if (existingDataViews.length > 0) {
-          logsDataView = existingDataViews[0];
-        } else {
-          // Create a temporary data view for logs-apm*
-          logsDataView = await dataViews.create({
-            title: 'logs-apm*',
-            timeFieldName: '@timestamp',
-          });
-        }
-      } catch (error) {
-        // If we can't create/find the data view, fall back to using the pattern directly
-        console.warn('Could not create data view for logs-apm*:', error);
-      }
-
-      // Open Discover directly with the logs-apm* index pattern
-      const discoverUrl = await locator?.getRedirectUrl({
-        indexPatternId: logsDataView?.id || 'logs-apm*',
-        timeRange: {
-          from: 'now-24h',
-          to: 'now',
-        },
-        query: {
-          language: 'kuery',
-          query: 'log.level: *',
-        },
-      });
-
+      const discoverUrl = await buildLogsDiscoverUrl(context, locator, dataViews);
+      
       if (discoverUrl) {
         window.open(discoverUrl, '_blank');
       }
