@@ -133,6 +133,7 @@ import type { SaveModalContainerProps } from './app_plugin/save_modal_container'
 
 import { setupExpressions } from './expressions';
 import { OpenInDiscoverDrilldown } from './trigger_actions/open_in_discover_drilldown';
+import { OpenLogsInDiscoverDrilldown } from './trigger_actions/open_logs_in_discover_drilldown';
 import { ChartInfoApi } from './chart_info_api';
 import { type LensAppLocator, LensAppLocatorDefinition } from '../common/locator/locator';
 import type { LensDocument } from './persistence';
@@ -445,6 +446,15 @@ export class LensPlugin {
 
     uiActionsEnhanced.registerDrilldown(
       new OpenInDiscoverDrilldown({
+        dataViews: () => this.dataViewsService!,
+        locator: () => share?.url.locators.get('DISCOVER_APP_LOCATOR'),
+        hasDiscoverAccess: () => this.hasDiscoverAccess,
+        application: () => startServices().core.application,
+      })
+    );
+
+    uiActionsEnhanced.registerDrilldown(
+      new OpenLogsInDiscoverDrilldown({
         dataViews: () => this.dataViewsService!,
         locator: () => share?.url.locators.get('DISCOVER_APP_LOCATOR'),
         hasDiscoverAccess: () => this.hasDiscoverAccess,
