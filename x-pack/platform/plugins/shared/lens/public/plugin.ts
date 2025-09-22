@@ -748,14 +748,14 @@ export class LensPlugin {
           this.hasDiscoverAccess
         )
       );
-      startDependencies.uiActions.addTriggerAction(
-        CONTEXT_MENU_TRIGGER,
-        createOpenLogsInDiscoverAction(
-          discoverLocator,
-          startDependencies.dataViews,
-          this.hasDiscoverAccess
-        )
-      );
+      // startDependencies.uiActions.addTriggerAction(
+      //   CONTEXT_MENU_TRIGGER,
+      //   createOpenLogsInDiscoverAction(
+      //     discoverLocator,
+      //     startDependencies.dataViews,
+      //     this.hasDiscoverAccess
+      //   )
+      // );
     }
 
     return {
