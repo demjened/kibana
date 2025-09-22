@@ -104,6 +104,10 @@ export const createOpenLogsInDiscoverAction = (
           from: 'now-24h',
           to: 'now',
         },
+        query: {
+          language: 'kuery',
+          query: 'log.level: *',
+        },
       });
 
       return discoverUrl || '';
@@ -151,6 +155,10 @@ export const createOpenLogsInDiscoverAction = (
         timeRange: {
           from: 'now-24h',
           to: 'now',
+        },
+        query: {
+          language: 'kuery',
+          query: 'log.level: *',
         },
       });
 
