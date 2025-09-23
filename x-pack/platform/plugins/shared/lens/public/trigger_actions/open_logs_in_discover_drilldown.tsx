@@ -501,6 +501,7 @@ export class OpenLogsInDiscoverDrilldown
                       options={[
                         {
                           id: 'sync',
+                          iconType: 'filter',
                           label: i18n.translate('xpack.lens.app.openLogsInDiscoverDrilldown.syncLabel', {
                             defaultMessage: 'Filter',
                           }),
@@ -510,6 +511,7 @@ export class OpenLogsInDiscoverDrilldown
                         },
                         {
                           id: 'exists',
+                          iconType: 'asterisk',
                           label: i18n.translate('xpack.lens.app.openLogsInDiscoverDrilldown.existsLabel', {
                             defaultMessage: 'Exists',
                           }),
@@ -518,6 +520,7 @@ export class OpenLogsInDiscoverDrilldown
                           }),
                         },
                       ]}
+                      isIconOnly={true}
                       idSelected={getFieldState(fieldName)}
                       onChange={(selectedOption) => handleFieldStateChange(fieldName, selectedOption)}
                       type="single"
