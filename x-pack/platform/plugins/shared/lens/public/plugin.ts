@@ -120,7 +120,7 @@ import type {
   VisualizationMap,
 } from './types';
 import { lensVisTypeAlias } from './vis_type_alias';
-import { createOpenInDiscoverAction, createOpenLogsInDiscoverAction } from './trigger_actions/open_in_discover_action';
+import { createOpenInDiscoverAction } from './trigger_actions/open_in_discover_action';
 import { inAppEmbeddableEditTrigger } from './trigger_actions/open_lens_config/in_app_embeddable_edit/in_app_embeddable_edit_trigger';
 
 import type {
@@ -748,14 +748,6 @@ export class LensPlugin {
           this.hasDiscoverAccess
         )
       );
-      // startDependencies.uiActions.addTriggerAction(
-      //   CONTEXT_MENU_TRIGGER,
-      //   createOpenLogsInDiscoverAction(
-      //     discoverLocator,
-      //     startDependencies.dataViews,
-      //     this.hasDiscoverAccess
-      //   )
-      // );
     }
 
     return {

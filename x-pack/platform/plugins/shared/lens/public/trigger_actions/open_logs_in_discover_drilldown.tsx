@@ -7,6 +7,7 @@
 
 import React, { useEffect } from 'react';
 import { APPLY_FILTER_TRIGGER } from '@kbn/data-plugin/public';
+import { CONTEXT_MENU_TRIGGER } from '@kbn/embeddable-plugin/public';
 import type { ApplicationStart } from '@kbn/core/public';
 import type { SerializableRecord } from '@kbn/utility-types';
 import type { CollectConfigProps as CollectConfigPropsBase } from '@kbn/kibana-utils-plugin/public';
@@ -322,7 +323,7 @@ export interface Config extends SerializableRecord {
 // Core log fields that are always included and not editable
 const CORE_LOG_FIELDS = ['@timestamp', 'log.level', 'message'] as const;
 
-export type OpenLogsInDiscoverTrigger = typeof APPLY_FILTER_TRIGGER;
+export type OpenLogsInDiscoverTrigger = typeof APPLY_FILTER_TRIGGER | typeof CONTEXT_MENU_TRIGGER;
 
 export type ActionFactoryContext = BaseActionFactoryContext & ActionContext;
 export type CollectConfigProps = CollectConfigPropsBase<Config, ActionFactoryContext>;
@@ -344,7 +345,7 @@ export class OpenLogsInDiscoverDrilldown
   public readonly euiIcon = 'logsApp';
 
   supportedTriggers(): OpenLogsInDiscoverTrigger[] {
-    return [APPLY_FILTER_TRIGGER];
+    return [APPLY_FILTER_TRIGGER, CONTEXT_MENU_TRIGGER];
   }
 
   private readonly ReactCollectConfig: React.FC<CollectConfigProps> = ({ config, onConfig, context }) => {
@@ -678,22 +679,32 @@ export class OpenLogsInDiscoverDrilldown
       const discoveryColumns = new Set<string>();
       
       // Add configured field names (includes core fields and user-defined fields)
-      config.fieldNames.forEach(fieldName => {
+      console.log('Processing configured fieldNames:', config.fieldNames);
+      config.fieldNames.forEach((fieldName, index) => {
         if (fieldName && fieldName.trim()) {
-          discoveryColumns.add(fieldName.trim());
+          const trimmedField = fieldName.trim();
+          discoveryColumns.add(trimmedField);
+          console.log(`Added field ${index}: "${trimmedField}" (original: "${fieldName}")`);
+        } else {
+          console.log(`Skipped empty field ${index}: "${fieldName}"`);
         }
       });
+      
+      console.log('Fields after processing config.fieldNames:', Array.from(discoveryColumns));
       
       // Add field names from structured filters that are allowed
       filterFields.forEach(fieldInfo => {
         if (shouldKeepField(fieldInfo.field)) {
           discoveryColumns.add(fieldInfo.field);
+          console.log(`Added field from filters: "${fieldInfo.field}"`);
         }
       });
 
       
       const columnsArray = Array.from(discoveryColumns);
-      console.log('Discover columns:', columnsArray);
+      console.log('Final Discover columns:', columnsArray);
+      console.log('Synchronized fields:', config.synchronizedFields);
+      console.log('Exists fields:', config.existsFields);
       
       // Configure column widths for better log viewing
       const gridColumns: Record<string, { width?: number }> = {};

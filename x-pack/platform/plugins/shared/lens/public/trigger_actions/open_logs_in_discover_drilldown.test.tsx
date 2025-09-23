@@ -77,18 +77,21 @@ describe('open logs in discover drilldown', () => {
   test('should have default config', () => {
     expect(drilldown.createConfig()).toEqual({
       openInNewTab: true,
+      fieldNames: ['@timestamp', 'log.level', 'message'],
+      synchronizedFields: [],
+      existsFields: [],
     });
   });
 
   test('config is always valid', () => {
-    expect(drilldown.isConfigValid({ openInNewTab: true })).toEqual(true);
-    expect(drilldown.isConfigValid({ openInNewTab: false })).toEqual(true);
+    expect(drilldown.isConfigValid({ openInNewTab: true, fieldNames: [], synchronizedFields: [], existsFields: [] })).toEqual(true);
+    expect(drilldown.isConfigValid({ openInNewTab: false, fieldNames: [], synchronizedFields: [], existsFields: [] })).toEqual(true);
   });
 
   test('renders config component', async () => {
     const Component = drilldown.CollectConfig;
     const props = {
-      config: { openInNewTab: false },
+      config: { openInNewTab: false, fieldNames: ['@timestamp'], synchronizedFields: [], existsFields: [] },
       onConfig: jest.fn(),
       context: {} as ActionFactoryContext,
     } as CollectConfigProps;
@@ -103,7 +106,7 @@ describe('open logs in discover drilldown', () => {
     const Component = drilldown.CollectConfig;
     const onConfig = jest.fn();
     const props = {
-      config: { openInNewTab: false },
+      config: { openInNewTab: false, fieldNames: ['@timestamp'], synchronizedFields: [], existsFields: [] },
       onConfig,
       context: {} as ActionFactoryContext,
     } as CollectConfigProps;
@@ -112,11 +115,11 @@ describe('open logs in discover drilldown', () => {
 
     await userEvent.click(screen.getByRole('switch'));
 
-    expect(onConfig).toHaveBeenCalledWith({ openInNewTab: true });
+    expect(onConfig).toHaveBeenCalledWith({ openInNewTab: true, fieldNames: ['@timestamp'], synchronizedFields: [], existsFields: [] });
   });
 
   test('execute with openInNewTab true opens new window', async () => {
-    const config = { openInNewTab: true };
+    const config = { openInNewTab: true, fieldNames: [], synchronizedFields: [], existsFields: [] };
     const context = {
       embeddable: getLensApiMock(),
       data: {},
@@ -130,7 +133,7 @@ describe('open logs in discover drilldown', () => {
   });
 
   test('execute with openInNewTab false navigates to URL', async () => {
-    const config = { openInNewTab: false };
+    const config = { openInNewTab: false, fieldNames: [], synchronizedFields: [], existsFields: [] };
     const context = {
       embeddable: getLensApiMock(),
       data: {},
@@ -144,7 +147,7 @@ describe('open logs in discover drilldown', () => {
   });
 
   test('getHref returns discover URL for logs-apm*', async () => {
-    const config = { openInNewTab: true };
+    const config = { openInNewTab: true, fieldNames: [], synchronizedFields: [], existsFields: [] };
     const context = {
       embeddable: getLensApiMock(),
       data: {},
